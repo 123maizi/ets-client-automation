@@ -1,0 +1,22 @@
+# logs / runtime data (may contain tokens, phone numbers, personal info)
+logs/
+temp/
+localdata/
+*.log
+*.tmp
+settings.json
+
+# local analysis artifacts
+dumps/
+screenshots/
+*.png
+*.jpg
+
+# editors / os
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# node
+node_modules/
