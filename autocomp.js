@@ -313,6 +313,62 @@
       client_time: nowStr()
     };
   }
+  /* ---------- 词汇类（无 entity）：struct 取答案 + score-sync 一次性提交 ---------- */
+  async function finishWordQuiz(hw) {
+    var st;
+    try {
+      st = await etsPost('g/homework/struct', {
+        id: Number(hw.id),
+        resource_id: String(hw.resource_id),
+        first_column_id: String(hw.first_column_id)
+      });
+    } catch (e) { log('quiz-struct-err', String(e)); return; }
+    var qs = (st && st.body && (st.body.word_question || st.body.question)) || [];
+    if (!qs.length) { log('quiz-no-questions', { id: hw.id }); return; }
+    tip('正在完成：' + hw.name + '\n共 ' + qs.length + ' 题');
+    var t = nowStr();
+    var detail = qs.map(function (q) {
+      var item = {
+        word_id: q.word_id,
+        question_id: q.id,
+        score_rate: 1,
+        score_detail: JSON.stringify({ choose: q.answer, score: 100 }),
+        client_time: t
+      };
+      if (q.item_id && q.question_item_id) {
+        item.item_id = q.item_id;
+        item.question_item_id = q.question_item_id;
+      }
+      return item;
+    });
+    var types = [6, 127, Number(hw.set_type) || 6];
+    var seen = {};
+    for (var i = 0; i < types.length; i++) {
+      var ty = types[i];
+      if (seen[ty]) continue;
+      seen[ty] = 1;
+      var payload = {
+        detail: detail,
+        homework_id: Number(hw.id),
+        resource_id: String(hw.resource_id),
+        type: ty,
+        use_time: CONF.USE_TIME,
+        mark_service: 1,
+        seq_id: md5hex16()
+      };
+      var r = null;
+      try { r = await etsPost('g/homework/score-sync', payload); } catch (e) { log('quiz-sync-throw', String(e)); }
+      if (r && r.code === 0) {
+        log('quiz-ok', { id: hw.id, type: ty, n: qs.length, body: r.body });
+        tip(hw.name + ' → 已提交 ' + qs.length + ' 题');
+        return;
+      }
+      log('quiz-type-fail', { id: hw.id, type: ty, code: r && r.code, msg: r && r.msg });
+    }
+    log('quiz-all-fail', { id: hw.id });
+    tip('词汇作业提交失败：' + hw.name);
+  }
+
   async function finishOne(hw, ti) {
     log('hw-start', { idx: ti, id: hw.id, name: hw.name, fc: hw.first_column_id, complete: hw.complete });
     tip('正在完成：' + hw.name);
@@ -324,7 +380,7 @@
     var st = hw.struct || (hw.structs && hw.structs[0]) || {};
     var contents = st.contents || [];
     log('hw-contents', { id: hw.id, n: contents.length, done: last });
-    if (!contents.length) return;
+    if (!contents.length) { await finishWordQuiz(hw); return; }
     var sent = 0;
 
     for (var round = 0; round < 4 && last < 100 && !state.stop; round++) {
@@ -384,7 +440,8 @@
 
   async function oneClick() {
     if (state.busy) { log('busy'); return; }
-    state.busy = true; state.stop = false; state.unsupported = 0; state.failStreak = 0; state.okStreak = 0; state.stats = { req: 0, ok: 0, fail: 0 };
+    state.busy = true; state.stop = false;
+    tip('正在读取作业列表…'); state.unsupported = 0; state.failStreak = 0; state.okStreak = 0; state.stats = { req: 0, ok: 0, fail: 0 };
     CONF.PER_REQUEST_DELAY = 300;
     try {
       initEnv();
@@ -397,12 +454,14 @@
         if (!x || (x.complete || 0) >= 100 || x.mock) return false;
         if (x.expire && x.end && Number(x.end) * 1000 < Date.now()) return false;
         var ents = (x.struct && x.struct.contents) || (x.structs && x.structs[0] && x.structs[0].contents) || [];
-        return ents.length > 0;   // 选择题/词汇类（无 entity）不碰，避免占用限一次机会
+        if (ents.length > 0) return true;
+        // 无 entity：词汇训练 / 单词 PK（first_column_id=127）走 score-sync
+        return String(x.first_column_id) === '127';
       });
       var skippedNoEntity = all.filter(function (x) {
         if (!x || (x.complete || 0) >= 100) return false;
         var ents = (x.struct && x.struct.contents) || (x.structs && x.structs[0] && x.structs[0].contents) || [];
-        return ents.length === 0;
+        return ents.length === 0 && String(x.first_column_id) !== '127';
       }).length;
       if (skippedNoEntity) log('skip-no-entity', { n: skippedNoEntity });
       log('list', { all: all.length, todo: todo.length });
@@ -423,7 +482,7 @@
       log('oneclick-done', state.stats);
       tip('执行结束：请求 ' + state.stats.req + '，成功 ' + state.stats.ok + (state.unsupported ? ('\n跳过 ' + state.unsupported + ' 份（服务端拒绝，可能是班级考试模式或账号受限）') : ''));
     } catch (e) { log('oneclick-throw', String(e)); }
-    finally { state.busy = false; }
+    finally { state.busy = false; resetBtn(); }
   }
 
   /* ---------- 页面内自动答题（选择题/词汇题） ---------- */
@@ -493,9 +552,21 @@
   function tip(msg) {
     try {
       var t = document.getElementById('etsx-tip');
-      if (!t) return;
-      t.style.display = 'block';
-      t.textContent = String(msg).slice(0, 300);
+      if (t) {
+        t.style.display = 'block';
+        t.textContent = String(msg).slice(0, 300);
+      }
+      var b = document.getElementById('etsx-btn');
+      if (b && state.busy) {
+        var m = String(msg).match(/(\d+)\s*%/);
+        b.textContent = m ? ('\u23f3 执行中 ' + m[1] + '%') : '\u23f3 执行中\u2026';
+      }
+    } catch (e) {}
+  }
+  function resetBtn() {
+    try {
+      var b = document.getElementById('etsx-btn');
+      if (b) { b.textContent = '\u26a1 一键完成'; b.disabled = false; }
     } catch (e) {}
   }
   function buildUI() {
@@ -526,15 +597,18 @@
 
       btn.onclick = function () {
         if (state.busy) { tip('正在执行中…'); return; }
+        btn.disabled = true; btn.textContent = '\u23f3 启动中\u2026';
         state.stop = false;
         tip('开始一键完成…');
         stopBtn.style.display = 'inline-block';
         oneClick().then(function () {
           stopBtn.style.display = 'none';
+          resetBtn();
           tip('执行结束：请求 ' + state.stats.req + ' / 成功 ' + state.stats.ok +
               (state.unsupported ? ('\n跳过 ' + state.unsupported + ' 份（服务端拒绝）') : ''));
         }, function (e) {
           stopBtn.style.display = 'none';
+          resetBtn();
           tip('出错了：' + e);
         });
       };
@@ -600,7 +674,7 @@
   /* ---------- 启动 ---------- */
   function boot() {
     hookXHR(); hookReqLog(); hookSign(); bindKeys(); initEnv();
-    window.ETSX = { v: 2, state: state, conf: CONF, etsPost: etsPost, oneClick: oneClick, autoAnswer: autoAnswer, maxOutParams: maxOutParams, log: log, pickToken: pickToken };
+    window.ETSX = { v: 2, state: state, conf: CONF, etsPost: etsPost, oneClick: oneClick, autoAnswer: autoAnswer, finishWordQuiz: finishWordQuiz, finishOne: finishOne, maxOutParams: maxOutParams, log: log, pickToken: pickToken };
     log('boot', { href: location.href, token: state.token ? 'yes' : 'no', base: state.base, ver: state.ver });
     buildUI();
     if (CONF.AUTO_RUN !== false) setTimeout(function () { autoRun(false); }, 2500);

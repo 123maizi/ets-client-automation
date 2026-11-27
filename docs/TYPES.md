@@ -52,18 +52,37 @@ g/homework/struct { id, resource_id, first_column_id }   // 注意是 id，不�
 * 该接口的 `detail[]` 结构较复杂，本项目未完全还原参数，实际采用**页面内点选**：
   按 `answer` 匹配选项并触发 `click`，24 题全对 → 100/100
 
-### C. 单词 PK（127，`pk=1`）
+### C. 单词 PK（127，`pk=1`）—— 已支持（v1.1.0）
 
-路由 `#/pk`，双人实时对战。**当前不支持**，原因：
+PC 客户端点「开始练习」会弹 **「电脑端暂不支持该题型，请使用移动端完成」**，
+这是前端 `needDownloadRes()` 的硬编码分支（`first_column_id=127` 且
+`set_module_id` 不在 2/5/3 时直接弹窗），**与接口能力无关**。
 
-1. 题库来自 `g/homework/pk-info`，与 `g/homework/struct` 的 `word_question` 不同源，
-   按后者答案点选实测命中仅 2/24
-2. 判分实时（点一下即判定），没有「最后统一提交」的窗口，不存在分数上报接口
-3. 每题有倒计时与点击间隔校验，脚本连点会被判无效
-4. 作业限一次，调试窗口极窄
+绕过弹窗、直接走接口即可，且与词汇训练同一条路径：
 
-若要支持，只有「自己解题」一条路：抓 `pk-info` 的题目字段，用
-`word_question` 里的 `content ↔ translate ↔ answer` 建词典反查，再按选项文本匹配点击。
+```
+g/homework/struct { id, resource_id, first_column_id }   → word_question[]（含 answer）
+g/homework/score-sync {
+  detail: [{ word_id, question_id, item_id?, question_item_id?,
+             score_rate: 1,
+             score_detail: '{"choose":"<answer>","score":100}',
+             client_time }],
+  homework_id, resource_id, type: 6, use_time, mark_service: 1, seq_id
+}
+```
+
+服务端返回：
+
+```json
+{ "code": 0, "body": { "complete_rate": 1, "pass": 1, "score_rate": 1 } }
+```
+
+作业随即变为 `complete=100 / avg_point=100 / pass=1`。
+
+补充：客户端自身提交 PK 时走 `g/pk/submit-word`，参数为
+`{serial_id, use_time, score_detail:[{question_id,word_id,point,answer,…}], resource_id, type:6}`，
+其中 `point` 由**客户端**给出（答对 10000）。实测该接口需要 `serial_id`（来自匹配会话），
+而 `score-sync` 这条路径不需要，是更省事的实现。
 
 ### D. 读写 / 作文（8 / 10 / 12）
 
@@ -77,7 +96,7 @@ g/homework/struct { id, resource_id, first_column_id }   // 注意是 id，不�
 | 单词 / 句子 / 课文跟读 | `sync-v2` 构造 | ✅ 100% |
 | 听说同步 / 音标 / 跟读专项 | `sync-v2` 构造 | ✅ |
 | 词汇训练（选择） | DOM 点选 | ✅ 100/100 |
-| 单词 PK | — | ⚠️ 未实现 |
+| 单词 PK | `struct` + `score-sync` | ✅ 100%（v1.1.0） |
 | 读写 / 作文 | — | ⚠️ 未实现 |
 
 ## 4. 判分归属（决定能否改写分数）
